@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirror the AnkerWork transmitter's mute into Google Meet
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+ExecStart=%h/.local/bin/mic-zero-watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
