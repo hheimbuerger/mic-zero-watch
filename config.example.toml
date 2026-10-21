@@ -1,0 +1,15 @@
+# mic-zero-watch config. Copy to ~/.config/mic-zero-watch/config.toml
+# (or $XDG_CONFIG_HOME/mic-zero-watch/config.toml). Every key is optional.
+
+# PipeWire node.name glob patterns of the mics to watch. List only mics you
+# have verified to send exact digital zeros when muted, and never while you're
+# merely quiet -- see "Does my mic qualify?" in the README. If several matching
+# mics are attached, earlier patterns win. Find node names with:
+#   pw-dump | grep '"node.name": "alsa_input'
+mics = [
+  "alsa_input.usb-Actions_AnkerWork_M650_RX_*",
+]
+
+# Port the Meet browser extension connects to. Must match the second port in
+# the extension's stream_deck_connection_manager.js.
+port = 2395

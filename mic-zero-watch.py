@@ -3,16 +3,19 @@
 # requires-python = ">=3.12"
 # dependencies = ["websockets>=13"]
 # ///
-"""Detect a muted AnkerWork M650 transmitter and mirror it into Google Meet.
+"""Detect a muted wireless mic transmitter and mirror it into Google Meet.
 
-A muted (or switched-off) AnkerWork M650 transmitter makes its USB receiver
-send exact digital zeros, while an unmuted mic always carries some room noise,
-even in a silent room. The mute itself is never reported over USB. So a run
-of 50 ms blocks where every sample is 0 means "muted".
+Some wireless mics, like the AnkerWork M650, never report their transmitter's
+mute button to the computer, but a muted transmitter makes the receiver send
+exact digital zeros, while an unmuted mic always carries some room noise, even
+in a silent room. So a run of 50 ms blocks where every sample is 0 means
+"muted". Only mics verified to behave like this may be watched: many mics with
+a noise gate also send zeros whenever you're quiet. Which mics are watched is
+set in the config file (see load_config()); the AnkerWork M650 is the default.
 
 Background mode (default) listens on ws://127.0.0.1:2395, where the Meet
 browser extension (streamdeck-googlemeet, branch feat/mic-watcher-control)
-connects while a Meet tab is open. While it is connected, the AnkerWork is
+connects while a Meet tab is open. While it is connected, the mic is
 watched, and:
 
 - transmitter muted   -> mute Meet, if Meet's mic was on; remember the mute
@@ -31,12 +34,16 @@ Meet etc. keep working.
 
 import argparse
 import asyncio
+import fnmatch
 import json
 import math
+import os
 import shutil
 import signal
 import sys
 import time
+import tomllib
+from pathlib import Path
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -45,20 +52,56 @@ RATE = 16000
 BLOCK_SAMPLES = RATE // 20          # 50 ms
 ZERO_BLOCKS_FOR_MUTE = 3            # 150 ms of exact zeros
 LIVE_BLOCKS_FOR_UNMUTE = 2          # 100 ms of signal
-MIC_GLOB_PREFIX = "alsa_input.usb-Actions_AnkerWork_M650_RX_"
-MEET_PORT = 2395
 DEVICE_POLL_S = 2.0
 READ_TIMEOUT_S = 1.0
 COMMAND_CONFIRM_S = 3.0
 FLOOR_DB = -90.0
+
+DEFAULT_CONFIG = {
+    # PipeWire node.name glob patterns of mics verified to send exact zeros
+    # only when muted. Earlier patterns win if several mics are attached.
+    "mics": ["alsa_input.usb-Actions_AnkerWork_M650_RX_*"],
+    # Must match the second port in the Meet browser extension.
+    "port": 2395,
+}
+
+
+def default_config_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "mic-zero-watch" / "config.toml"
+
+
+def load_config(path):
+    """Read the TOML config; every key is optional and falls back to DEFAULT_CONFIG."""
+    config = dict(DEFAULT_CONFIG)
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return config
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"mic-zero-watch: invalid config {path}: {e}")
+    unknown = set(data) - set(DEFAULT_CONFIG)
+    if unknown:
+        sys.exit(f"mic-zero-watch: unknown key(s) in {path}: {', '.join(sorted(unknown))}")
+    if "mics" in data:
+        mics = data["mics"]
+        if not (isinstance(mics, list) and mics and all(isinstance(m, str) for m in mics)):
+            sys.exit(f"mic-zero-watch: 'mics' in {path} must be a non-empty list of strings")
+        config["mics"] = mics
+    if "port" in data:
+        if not isinstance(data["port"], int) or not 0 < data["port"] < 65536:
+            sys.exit(f"mic-zero-watch: 'port' in {path} must be a port number")
+        config["port"] = data["port"]
+    return config
 
 
 def log(*parts):
     print(time.strftime("%H:%M:%S"), *parts, flush=True)
 
 
-async def find_mic(explicit):
-    """Return the node.name to watch, or None if no AnkerWork is attached."""
+async def find_mic(patterns):
+    """Return the node.name of the first attached mic matching the patterns, or None."""
     proc = await asyncio.create_subprocess_exec(
         "pw-dump", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     out, _ = await proc.communicate()
@@ -66,13 +109,15 @@ async def find_mic(explicit):
         objects = json.loads(out)
     except json.JSONDecodeError:
         return None
-    for obj in objects:
-        props = (obj.get("info") or {}).get("props") or {}
-        if props.get("media.class") != "Audio/Source":
-            continue
-        name = props.get("node.name", "")
-        if (explicit and name == explicit) or (not explicit and name.startswith(MIC_GLOB_PREFIX)):
-            return name
+    names = [
+        props.get("node.name", "")
+        for obj in objects
+        if (props := (obj.get("info") or {}).get("props") or {}).get("media.class") == "Audio/Source"
+    ]
+    for pattern in patterns:
+        for name in names:
+            if fnmatch.fnmatchcase(name, pattern):
+                return name
     return None
 
 
@@ -174,7 +219,7 @@ class Live:
 
     def show(self, mic, peak, state):
         if mic is None:
-            text = "\033[90mno AnkerWork receiver connected\033[0m"
+            text = "\033[90mnone of the configured mics is connected\033[0m"
         else:
             db = 20 * math.log10(peak / 32768) if peak else float("-inf")
             label = {"muted": "\033[1;31mMUTED / NO SIGNAL\033[0m",
@@ -245,22 +290,22 @@ async def watch_mic(mic, meet, live):
             await proc.wait()
 
 
-async def run(args):
+async def run(args, config):
     # systemd stops us with SIGTERM: unwind normally so pw-record is reaped.
     asyncio.get_running_loop().add_signal_handler(
         signal.SIGTERM, asyncio.current_task().cancel)
     meet = Meet()
     server = None
     try:
-        server = await serve(meet.handler, "127.0.0.1", MEET_PORT)
+        server = await serve(meet.handler, "127.0.0.1", config["port"])
     except OSError:
         if not args.live:
-            log(f"port {MEET_PORT} is already in use; is another instance running?")
+            log(f"port {config['port']} is already in use; is another instance running?")
             return 1
         meet = None  # live view only; the background service drives Meet
     live = Live(meet) if args.live else None
     if not args.live:
-        log(f"listening for the Meet extension on 127.0.0.1:{MEET_PORT}")
+        log(f"listening for the Meet extension on 127.0.0.1:{config['port']}")
 
     try:
         while True:
@@ -269,7 +314,7 @@ async def run(args):
                 meet.changed.clear()
                 await meet.changed.wait()
                 continue
-            mic = await find_mic(args.target)
+            mic = await find_mic([args.target] if args.target else config["mics"])
             if mic is None:
                 if live:
                     live.show(None, 0, "live")
@@ -288,10 +333,13 @@ def main():
     parser.add_argument("--live", action="store_true",
                         help="show a one-line live view instead of logging")
     parser.add_argument("--target", metavar="NODE_NAME",
-                        help="watch this PipeWire node instead of the AnkerWork receiver")
+                        help="watch this PipeWire node instead of the configured mics")
+    parser.add_argument("--config", metavar="PATH", type=Path, default=default_config_path(),
+                        help="config file (default: %(default)s)")
     args = parser.parse_args()
+    config = load_config(args.config)
     try:
-        sys.exit(asyncio.run(run(args)))
+        sys.exit(asyncio.run(run(args, config)))
     except asyncio.CancelledError:
         pass
     except KeyboardInterrupt:
