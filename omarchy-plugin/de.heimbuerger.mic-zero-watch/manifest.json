@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "de.heimbuerger.mic-zero-watch",
+  "name": "Mic Zero Watch",
+  "version": "1.0.0",
+  "author": "Henrik Heimbuerger",
+  "description": "Switch for hands-free dictation: the wireless mic's mute button starts and stops voxtype",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Mic Zero Watch",
+    "description": "Switch for hands-free dictation: the wireless mic's mute button starts and stops voxtype",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

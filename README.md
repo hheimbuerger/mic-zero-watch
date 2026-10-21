@@ -3,11 +3,12 @@
 Detects when a wireless mic's transmitter is muted or unmuted, and turns that into two features:
 
 - **Meet link:** the transmitter's mute button mutes and unmutes your mic in Google Meet.
-- **Hands-free dictation:** the transmitter's mute button starts and stops dictation with [voxtype](https://github.com/peteonrails/voxtype).
+- **Hands-free dictation:** the transmitter's mute button starts and stops dictation with [voxtype](https://github.com/peteonrails/voxtype). Switch it on and off from an Omarchy bar widget.
 
 Some wireless mics never tell the computer that their transmitter's mute button was pressed. The AnkerWork M650 is one: no HID report, no USB-audio status interrupt, nothing on any endpoint (verified with usbmon). But a muted transmitter makes the receiver send exact digital zeros, while an unmuted mic always carries some room noise, around -62 to -66 dBFS even in a silent room. So three consecutive 50 ms blocks of all-zero samples mean "muted", and two blocks with signal mean "unmuted" again. A switched-off transmitter presumably looks the same.
 
 - [`daemon/`](daemon/): the watcher itself (`mic-zero-watch.py`), its systemd user service and an example config.
+- [`omarchy-plugin/`](omarchy-plugin/): the optional bar widget for Omarchy's shell.
 
 ## Meet link
 
@@ -29,13 +30,33 @@ A switch, off by default, that turns the transmitter's mute button into a dictat
 
 Like the Meet link, it acts only when the transmitter changes, so switching the mode on while the transmitter is already unmuted doesn't start a recording until the next mute and unmute. It only ever stops a recording it started itself: if voxtype is already busy, for example with a hotkey dictation, unmuting starts nothing. A Meet tab always wins: while one is connected, dictation is paused, and a recording in progress is cancelled when Meet connects. Switching the mode off mid-recording cancels the recording, so nothing is pasted. The mode also switches itself off whenever none of the configured mics is connected, including when you switch it on without one; switch it on again once the mic is back.
 
-Switch it from a terminal:
+Switch it with the bar widget below, or from a terminal:
 
 ```sh
 mic-zero-watch --dictation on|off|toggle
 ```
 
 The switch is the file `$XDG_RUNTIME_DIR/mic-zero-watch/dictation`, so it's off again after every reboot.
+
+## Omarchy bar widget
+
+`omarchy-plugin/de.heimbuerger.mic-zero-watch` is a bar widget for [Omarchy](https://omarchy.org/)'s shell. Clicking it toggles hands-free dictation; right-clicking opens voxtype's settings (`omarchy-voxtype-config`). The mic icon's color is the switch, and a small badge next to it shows the substate:
+
+| Icon | Meaning |
+|---|---|
+| mic, alert color, hollow circle badge | armed: the next unmute of the transmitter starts dictating |
+| mic, alert color, filled circle badge | recording |
+| mic, grey, video badge | on, but paused while a Meet tab is connected |
+| mic, grey, no badge | off |
+| crossed-out mic, grey | no configured mic is connected, or the service isn't running |
+
+The widget reads `$XDG_RUNTIME_DIR/mic-zero-watch/status.json`, which the service keeps up to date while it runs and removes when it stops.
+
+voxtype's own recording icon in Omarchy's indicators widget becomes redundant next to this widget and voxtype's on-screen overlay, and the widget's right-click replaces its shortcut to the settings. To hide it, give `omarchy.indicators` an `items` list without `Dictation` in `~/.config/omarchy/shell.json`:
+
+```json
+{ "id": "omarchy.indicators", "items": ["ScreenRecording", "Reminder", "NightLight", "Dnd", "StayAwake"] }
+```
 
 ## Configuration
 
@@ -77,6 +98,11 @@ ln -s "$PWD"/daemon/mic-zero-watch.py ~/.local/bin/mic-zero-watch
 systemctl --user link "$PWD"/daemon/mic-zero-watch.service
 systemctl --user enable --now mic-zero-watch.service
 journalctl --user -u mic-zero-watch -f
+
+# Optional: the Omarchy bar widget
+ln -s "$PWD"/omarchy-plugin/de.heimbuerger.mic-zero-watch ~/.config/omarchy/plugins/
+omarchy-shell shell rescanPlugins
+omarchy bar put de.heimbuerger.mic-zero-watch --after omarchy.indicators
 ```
 
 Hands-free dictation needs voxtype's daemon running; the Meet link doesn't.
